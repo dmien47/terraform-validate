@@ -1,3 +1,11 @@
+// Import required modules first
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const express = require("express");
+const { exec } = require("child_process");
+const { promisify } = require("util");
+
 // Set up Terraform plugin cache directory for faster init (shared across requests)
 const PLUGIN_CACHE_DIR = process.env.TF_PLUGIN_CACHE_DIR || "/tmp/terraform-plugin-cache";
 process.env.TF_PLUGIN_CACHE_DIR = PLUGIN_CACHE_DIR;
@@ -9,13 +17,6 @@ if (!fs.existsSync(PLUGIN_CACHE_DIR)) {
 } else {
   console.log(`Using Terraform plugin cache directory: ${PLUGIN_CACHE_DIR}`);
 }
-
-const express = require("express");
-const { exec } = require("child_process");
-const { promisify } = require("util");
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
 
 const execAsync = promisify(exec);
 
