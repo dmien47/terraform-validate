@@ -1,4 +1,14 @@
-process.env.TF_PLUGIN_CACHE_DIR = "/tmp/terraform-plugin-cache";
+// Set up Terraform plugin cache directory for faster init (shared across requests)
+const PLUGIN_CACHE_DIR = process.env.TF_PLUGIN_CACHE_DIR || "/tmp/terraform-plugin-cache";
+process.env.TF_PLUGIN_CACHE_DIR = PLUGIN_CACHE_DIR;
+
+// Ensure plugin cache directory exists
+if (!fs.existsSync(PLUGIN_CACHE_DIR)) {
+  fs.mkdirSync(PLUGIN_CACHE_DIR, { recursive: true });
+  console.log(`Created Terraform plugin cache directory: ${PLUGIN_CACHE_DIR}`);
+} else {
+  console.log(`Using Terraform plugin cache directory: ${PLUGIN_CACHE_DIR}`);
+}
 
 const express = require("express");
 const { exec } = require("child_process");
