@@ -113,29 +113,15 @@ app.post("/validate", async (req, res) => {
     // Write HCL2 code to temporary file
     fs.writeFileSync(tempFile, code, "utf8");
 
-    try {
-      // Initialize Terraform (required before validate)
-      // Use -backend=false to skip backend initialization for faster validation
-      await execAsync(`${TERRAFORM_CMD} init -backend=false -input=false`, {
-        cwd: tempDir,
-        timeout: 30000, // 30 second timeout for init
-      });
-    } catch (initError) {
-      // If init fails, we can still try validate for basic syntax checking
-      // Some validation errors might be about missing providers, but that's still useful
-      console.warn(
-        "Terraform init failed, proceeding with validate:",
-        initError.message,
-      );
-    }
-
-    // Run terraform validate
-    // Note: terraform validate exits 1 on validation failure but still outputs JSON to stdout
+    // Try validate first without init for fast path (works for basic syntax checking)
+    // Only run init if validate fails due to missing providers/initialization
     let stdout = "";
+    let needsInit = false;
+
     try {
       const result = await execAsync(`${TERRAFORM_CMD} validate -json`, {
         cwd: tempDir,
-        timeout: 10000, // 10 second timeout for validate
+        timeout: 3000, // 3 second timeout for validate (should be fast)
       });
       stdout = result.stdout;
     } catch (validateError) {
@@ -143,8 +129,45 @@ app.post("/validate", async (req, res) => {
       stdout = validateError.stdout || "";
       const stderr = validateError.stderr || validateError.message || "";
 
-      // If we got no stdout, treat as real command failure
-      if (!stdout.trim()) {
+      // Check if we need to initialize (provider/initialization errors)
+      // Only trigger init if we get explicit init-related errors, not generic failures
+      const requiresInit =
+        stderr.includes("initialization required") ||
+        stderr.includes("provider requirements") ||
+        stderr.includes("terraform init") ||
+        stderr.includes("Could not satisfy plugin requirements") ||
+        stderr.includes("Error: Missing required provider") ||
+        stderr.includes("Error: Provider requirements");
+
+      // Also check JSON diagnostics for init-related errors
+      if (stdout.trim() && !requiresInit) {
+        try {
+          const parsed = JSON.parse(stdout);
+          if (parsed.diagnostics) {
+            const hasInitError = parsed.diagnostics.some(
+              (d) =>
+                d.summary &&
+                (d.summary.includes("initialization required") ||
+                  d.summary.includes("provider requirements") ||
+                  d.summary.includes("terraform init") ||
+                  d.summary.includes("plugin requirements"))
+            );
+            if (hasInitError) {
+              requiresInit = true;
+            }
+          }
+        } catch (e) {
+          // If JSON parse fails, check stdout text
+          if (stdout.includes("terraform init") || stdout.includes("initialization")) {
+            requiresInit = true;
+          }
+        }
+      }
+
+      if (requiresInit) {
+        needsInit = true;
+      } else if (!stdout.trim()) {
+        // Real command failure
         if (
           stderr.includes("command not found") ||
           stderr.includes("terraform: not found")
@@ -161,6 +184,54 @@ app.post("/validate", async (req, res) => {
           error: "Terraform validate command failed",
           details: stderr,
         });
+      }
+    }
+
+    // If validation failed due to missing init, run init and retry
+    if (needsInit) {
+      try {
+        // Initialize Terraform (required for provider-based validation)
+        // Flags to optimize init with cached providers:
+        // -backend=false: Skip backend initialization
+        // -input=false: Skip interactive prompts
+        // -upgrade=false: Don't upgrade providers (use cached versions)
+        // -reconfigure: Force reconfiguration (needed for new temp dirs)
+        // Plugin cache will be used automatically via TF_PLUGIN_CACHE_DIR
+        await execAsync(
+          `${TERRAFORM_CMD} init -backend=false -input=false -upgrade=false -reconfigure`,
+          {
+            cwd: tempDir,
+            timeout: 30000, // 30 second timeout for init
+          }
+        );
+      } catch (initError) {
+        // If init fails, we can still try validate for basic syntax checking
+        console.warn(
+          "Terraform init failed, proceeding with validate:",
+          initError.message,
+        );
+      }
+
+      // Retry validate after init
+      try {
+        const result = await execAsync(`${TERRAFORM_CMD} validate -json`, {
+          cwd: tempDir,
+          timeout: 3000, // 3 second timeout for validate
+        });
+        stdout = result.stdout;
+      } catch (validateError) {
+        // Exit code 1 = validation failed; Terraform still prints JSON to stdout
+        stdout = validateError.stdout || "";
+        const stderr = validateError.stderr || validateError.message || "";
+
+        // If we got no stdout, treat as real command failure
+        if (!stdout.trim()) {
+          return res.status(500).json({
+            valid: false,
+            error: "Terraform validate command failed",
+            details: stderr,
+          });
+        }
       }
     }
 
